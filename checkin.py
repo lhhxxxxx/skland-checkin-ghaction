@@ -1,77 +1,293 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+File: auto_sign.py(森空岛签到)
+Author: Zerolouis
+cron: 0 30 8 * * *
+new Env('森空岛签到');
+Update: 2023/9/5
+"""
+import hashlib
+import hmac
 import json
-import sys
+import logging
+import os
 import time
+from urllib import parse
 
 import requests
+import notify
 
-# 声明常量
-# 签到url post请求
-SIGN_URL = "https://zonai.skland.com/api/v1/game/attendance"
-SUCCESS_CODE = 0
-# 休眠三秒继续其他账号签到
-SLEEP_TIME = 3
-FAIL_SIGN = False
+skyland_tokens = os.getenv('SKYLAND_TOKEN') or ''
+skyland_notify = os.getenv('SKYLAND_NOTIFY') or ''
 
-# 读取cookie
-cookie_lines = sys.argv[1].split(";;")
-print("已读取" + str(len(cookie_lines)) + "个目标")
-print(str(SLEEP_TIME) + "秒后进行签到...")
-time.sleep(SLEEP_TIME)
+# 消息内容
+run_message: str = ''
 
-# 遍历cookie
-for cookie_line in cookie_lines:
+account_num: int = 1
 
-    # 准备签到信息
-    uid = cookie_line
-    signing_cookie = sys.argv[2].strip()
-    headers = {
-        "user-agent": "Skland/1.0.1 (com.hypergryph.skland; build:100001014; Android 25; ) Okhttp/4.11.0",
-        "cred": signing_cookie
-    }
-    data = {
-        "uid": str(uid),
-        "gameId": 1
-    }
+header = {
+    'cred': '',
+    'User-Agent': 'Skland/1.0.1 (com.hypergryph.skland; build:100001014; Android 31; ) Okhttp/4.11.0',
+    'Accept-Encoding': 'gzip',
+    'Connection': 'close'
+}
 
-    # 签到请求
-    sign_response = requests.post(headers=headers, url=SIGN_URL, data=data)
+header_login = {
+    'User-Agent': 'Skland/1.0.1 (com.hypergryph.skland; build:100001014; Android 31; ) Okhttp/4.11.0',
+    'Accept-Encoding': 'gzip',
+    'Connection': 'close'
+}
 
-    # 检验返回是否为json格式
-    try:
-        sign_response_json = json.loads(sign_response.text)
-    except:
-        print(sign_response.text)
-        print("返回结果非json格式，请检查...")
-        time.sleep(SLEEP_TIME)
-        sys.exit()
+# 签名请求头一定要这个顺序，否则失败
+# timestamp是必填的,其它三个随便填,不要为none即可
+header_for_sign = {
+    'platform': '',
+    'timestamp': '',
+    'dId': '',
+    'vName': ''
+}
 
-    # 如果为json则解析
-    code = sign_response_json.get("code")
-    message = sign_response_json.get("message")
-    data = sign_response_json.get("data")
+# 参数验证的token
+sign_token = ''
 
-    # 返回成功的话，打印详细信息
-    if code == SUCCESS_CODE:
-        print("签到成功")
-        awards = sign_response_json.get("data").get("awards")
-        for award in awards:
-            print("签到获得的奖励ID为：" + award.get("resource").get("id"))
-            print("此次签到获得了" + str(award.get("count")) + "单位的" + award.get("resource").get("name") + "(" + award.get(
-                "resource").get("type") + ")")
-            print("奖励类型为：" + award.get("type"))
+# 签到url
+sign_url = "https://zonai.skland.com/api/v1/game/attendance"
+# 绑定的角色url
+binding_url = "https://zonai.skland.com/api/v1/game/player/binding"
+
+# 使用认证代码获得cred
+cred_code_url = "https://zonai.skland.com/api/v1/user/auth/generate_cred_by_code"
+# 使用token获得认证代码
+grant_code_url = "https://as.hypergryph.com/user/oauth2/v2/grant"
+
+app_code = '4ca99fa6b56cc2ba'
+
+
+def sendMessage(title: str, content: str, type: str):
+    """
+    整合消息
+    :param title: 标题
+    :param content: 内容
+    :param type: 类型
+    :return: none
+    """
+    if (skyland_notify):
+        type = type.strip()
+        match type:
+            case 'TG':
+                notify.telegram_bot(title, content)
+            case 'BARK':
+                notify.bark(title, content)
+            case 'DD':
+                notify.dingding_bot(title, content)
+            case 'FSKEY':
+                notify.feishu_bot(title, content)
+            case 'GOBOT':
+                notify.go_cqhttp(title, content)
+            case 'GOTIFY':
+                notify.gotify(title, content)
+            case 'IGOT':
+                notify.iGot(title, content)
+            case 'SERVERJ':
+                notify.serverJ(title, content)
+            case 'PUSHDEER':
+                notify.pushdeer(title, content)
+            case 'PUSHPLUS':
+                notify.pushplus_bot(title, content)
+            case 'QMSG':
+                notify.qmsg_bot(title, content)
+            case 'QYWXAPP':
+                notify.wecom_app(title, content)
+            case 'QYWXBOT':
+                notify.wecom_bot(title, content)
+            case _:
+                pass
+
+
+def generate_signature(token: str, path, body_or_query):
+    """
+    获得签名头
+    接口地址+方法为Get请求？用query否则用body+时间戳+ 请求头的四个重要参数（dId，platform，timestamp，vName）.toJSON()
+    将此字符串做HMAC加密，算法为SHA-256，密钥token为请求cred接口会返回的一个token值
+    再将加密后的字符串做MD5即得到sign
+    :param token: 拿cred时候的token
+    :param path: 请求路径（不包括网址）
+    :param body_or_query: 如果是GET，则是它的query。POST则为它的body
+    :return: 计算完毕的sign
+    """
+    # 总是说请勿修改设备时间，怕不是yj你的服务器有问题吧，所以这里特地-2
+    t = str(int(time.time()) - 2)
+    token = token.encode('utf-8')
+    header_ca = json.loads(json.dumps(header_for_sign))
+    header_ca['timestamp'] = t
+    header_ca_str = json.dumps(header_ca, separators=(',', ':'))
+    s = path + body_or_query + t + header_ca_str
+    hex_s = hmac.new(token, s.encode('utf-8'), hashlib.sha256).hexdigest()
+    md5 = hashlib.md5(hex_s.encode('utf-8')).hexdigest().encode('utf-8').decode('utf-8')
+    logging.info(f'算出签名: {md5}')
+    return md5, header_ca
+
+
+def get_sign_header(url: str, method, body, old_header):
+    h = json.loads(json.dumps(old_header))
+    p = parse.urlparse(url)
+    if method.lower() == 'get':
+        h['sign'], header_ca = generate_signature(sign_token, p.path, p.query)
     else:
-        if sign_response_json["message"]!="请勿重复签到！":
-            FAIL_SIGN = True
-        print(sign_response_json)
-        print("签到失败，请检查以上信息...")
+        h['sign'], header_ca = generate_signature(sign_token, p.path, json.dumps(body))
+    for i in header_ca:
+        h[i] = header_ca[i]
+    return h
 
-    # 休眠指定时间后，继续下个账户
-    time.sleep(SLEEP_TIME)
 
-class AbnormalChekinException(Exception):
-    pass
+def copy_header(cred):
+    """
+    组装请求头
+    :param cred: cred
+    :return: 拼装后的请求头
+    """
+    v = json.loads(json.dumps(header))
+    v['cred'] = cred
+    return v
 
-if FAIL_SIGN:
-    raise AbnormalChekinException("存在签到失败的账号，请检查信息")
-else:
-    print("程序运行结束")
+
+def login_by_token(token_code):
+    """
+    通过token登录森空岛获取认证
+    :param token_code: 森空岛token
+    :return: cred
+    """
+    try:
+        t = json.loads(token_code)
+        token_code = t['data']['content']
+    except:
+        pass
+    grant_code = get_grant_code(token_code)
+    return get_cred(grant_code)
+
+
+def get_cred(grant):
+    """
+    获取cred
+    :param grant:认证代码
+    :return: cred
+    """
+    resp = requests.post(cred_code_url, json={
+        'code': grant,
+        'kind': 1
+    }, headers=header_login).json()
+    if resp['code'] != 0:
+        raise Exception(f'获得cred失败：{resp["messgae"]}')
+    global sign_token
+    sign_token = resp['data']['token']
+    return resp['data']['cred']
+
+
+def get_grant_code(token):
+    """
+    获取认证代码
+    :param token: token
+    :return: 认证代码
+    """
+    resp = requests.post(grant_code_url, json={
+        'appCode': app_code,
+        'token': token,
+        'type': 0
+    }, headers=header_login).json()
+    if resp['status'] != 0:
+        raise Exception(f'使用token: {token} 获得认证代码失败：{resp["msg"]}')
+    return resp['data']['code']
+
+
+def get_binding_list(cred):
+    """
+    获取绑定的角色
+    :param cred: cred
+    :return: 返回绑定角色列表
+    """
+    global run_message
+    message: str
+    v = []
+    resp = requests.get(binding_url, headers=get_sign_header(binding_url, 'get', None, copy_header(cred))).json()
+    if resp['code'] != 0:
+        message = f"请求角色列表出现问题：{resp['message']}"
+        run_message += message + '\n'
+        logging.error(message)
+        if resp.get('message') == '用户未登录':
+            message = f'用户登录可能失效了，请重新登录！'
+            run_message += message + '\n'
+            logging.error(message)
+            return v
+    for i in resp['data']['list']:
+        if i.get('appCode') != 'arknights':
+            continue
+        v.extend(i.get('bindingList'))
+    return v
+
+
+def do_sign(cred):
+    """
+    进行签到
+    :param cred: cred
+    :return: none
+    """
+    global run_message
+    characters = get_binding_list(cred)
+    global account_num
+    for i in characters:
+        body = {
+            'uid': i.get('uid'),
+            'gameId': i.get("channelMasterId")
+        }
+        resp = requests.post(sign_url, headers=get_sign_header(sign_url, 'post', body, copy_header(cred)),
+                             json=body).json()
+        if resp['code'] != 0:
+            fail_message: str = f'角色{i.get("nickName")}({i.get("channelName")})签到失败了！原因：{resp.get("message")}'
+            run_message += f'[账号{account_num}] {fail_message}\n'
+            print(fail_message)
+            account_num += 1
+            continue
+        awards = resp['data']['awards']
+        for j in awards:
+            res = j['resource']
+            success_message: str = f'角色{i.get("nickName")}({i.get("channelName")})签到成功，获得了{res["name"]}x{res.get("count") or 1}\n'
+            run_message += f'[账号{account_num}] {success_message}\n'
+            account_num += 1
+            print(success_message)
+
+
+def start(token):
+    """
+    开始签到
+    :param token:
+    :return: none
+    """
+    global run_message
+    try:
+        cred = login_by_token(token)
+        do_sign(cred)
+    except Exception as ex:
+        run_message += f'签到失败: {ex}'
+        logging.error('签到完全失败了！: ', exc_info=ex)
+
+
+def main():
+    global run_message
+    token_list = skyland_tokens.split(';')
+    if len(token_list) != 0:
+        for token in token_list:
+            if token:
+                start(token)
+                print('等待10s')
+                time.sleep(10)
+    else:
+        print('没有设置token，请在环境变量里添加至少一个token')
+        run_message = '没有设置token，请在环境变量里添加至少一个token'
+    # 发送消息
+    sendMessage('森空岛签到', run_message, skyland_notify.strip())
+
+
+if __name__ == "__main__":
+    main()
