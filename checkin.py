@@ -17,10 +17,8 @@ import time
 from urllib import parse
 
 import requests
-import notify
 
 skyland_tokens = os.getenv('SKYLAND_TOKEN') or ''
-skyland_notify = os.getenv('SKYLAND_NOTIFY') or ''
 
 # 消息内容
 run_message: str = ''
@@ -73,38 +71,7 @@ def sendMessage(title: str, content: str, type: str):
     :param type: 类型
     :return: none
     """
-    if (skyland_notify):
-        type = type.strip()
-        match type:
-            case 'TG':
-                notify.telegram_bot(title, content)
-            case 'BARK':
-                notify.bark(title, content)
-            case 'DD':
-                notify.dingding_bot(title, content)
-            case 'FSKEY':
-                notify.feishu_bot(title, content)
-            case 'GOBOT':
-                notify.go_cqhttp(title, content)
-            case 'GOTIFY':
-                notify.gotify(title, content)
-            case 'IGOT':
-                notify.iGot(title, content)
-            case 'SERVERJ':
-                notify.serverJ(title, content)
-            case 'PUSHDEER':
-                notify.pushdeer(title, content)
-            case 'PUSHPLUS':
-                notify.pushplus_bot(title, content)
-            case 'QMSG':
-                notify.qmsg_bot(title, content)
-            case 'QYWXAPP':
-                notify.wecom_app(title, content)
-            case 'QYWXBOT':
-                notify.wecom_bot(title, content)
-            case _:
-                pass
-
+    pass
 
 def generate_signature(token: str, path, body_or_query):
     """
@@ -285,8 +252,6 @@ def main():
     else:
         print('没有设置token，请在环境变量里添加至少一个token')
         run_message = '没有设置token，请在环境变量里添加至少一个token'
-    # 发送消息
-    sendMessage('森空岛签到', run_message, skyland_notify.strip())
 
 
 if __name__ == "__main__":
