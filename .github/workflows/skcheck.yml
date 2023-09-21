@@ -18,6 +18,7 @@ jobs:
     - name: Prepare module
       run: |
         pip3 install requests
+        pip3 install notify
     - name: Run Checkin
       env:
         SKYLAND_TOKEN: ${{ secrets.SKYLAND_TOKEN }}
