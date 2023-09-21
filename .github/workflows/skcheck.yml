@@ -20,7 +20,6 @@ jobs:
         pip3 install requests
     - name: Run Checkin
       env:
-        UID: ${{ secrets.UID }}
-        CRED: ${{ secrets.CRED }}
+        SKYLAND_TOKEN: ${{ secrets.SKYLAND_TOKEN }}
       run: |
-        python checkin.py ${UID} ${CRED}
+        python checkin.py ${SKYLAND_TOKEN}
