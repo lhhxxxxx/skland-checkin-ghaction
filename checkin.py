@@ -186,7 +186,9 @@ def get_binding_list(cred):
             message = f'用户登录可能失效了，请重新登录！'
             run_message += message + '\n'
             logging.error(message)
+            raise Exception(message)
             return v
+        raise Exception(message)
     for i in resp['data']['list']:
         if i.get('appCode') != 'arknights':
             continue
@@ -238,6 +240,7 @@ def start(token):
     except Exception as ex:
         run_message += f'签到失败: {ex}'
         logging.error('签到完全失败了！: ', exc_info=ex)
+        raise Exception(f'签到完全失败了！')
 
 
 def main():
